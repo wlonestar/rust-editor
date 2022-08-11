@@ -1,4 +1,11 @@
+pub mod editor;
+pub mod reader;
+pub mod writer;
+
+use crate::writer::Writer;
 use crossterm::terminal;
+
+const VERSION: &str = "0.1.0";
 
 pub struct CleanUp;
 
@@ -8,5 +15,6 @@ pub struct CleanUp;
 impl Drop for CleanUp {
     fn drop(&mut self) {
         terminal::disable_raw_mode().expect("Could not disable raw mode");
+        Writer::clear_screen().expect("Error");
     }
 }
