@@ -19,6 +19,7 @@ pub struct Writer {
     pub cursor_controller: CursorController,
     pub editor_rows: EditorRows,
     pub status_message: StatusMessage,
+    pub dirty: u64,
 }
 
 impl Writer {
@@ -32,12 +33,11 @@ impl Writer {
             editor_contents: EditorContents::new(),
             cursor_controller: CursorController::new(win_size),
             editor_rows: EditorRows::new(),
-            status_message: StatusMessage::new("HELP: Ctrl-Q = Quit".into()),
+            status_message: StatusMessage::new("HELP: Ctrl-S = Save | Ctrl-Q = Quit".into()),
+            dirty: 0,
         }
     }
-}
 
-impl Writer {
     /// clear screen
     pub fn clear_screen() -> crossterm::Result<()> {
         // clear screen
@@ -96,13 +96,14 @@ impl Writer {
         self.editor_contents
             .push_str(&style::Attribute::Reverse.to_string());
         let info = format!(
-            "{} - {} lines",
+            "{} {} - {} lines",
             self.editor_rows
                 .filename
                 .as_ref()
                 .and_then(|path| path.file_name())
                 .and_then(|name| name.to_str())
                 .unwrap_or("[No Name]"),
+            if self.dirty > 0 { "(modified)" } else { "" },
             self.editor_rows.number_of_rows()
         );
         let info_len = cmp::min(info.len(), self.win_size.0);
@@ -144,6 +145,68 @@ impl Writer {
             .move_cursor(direction, &self.editor_rows);
     }
 
+    /// insert char
+    pub fn insert_char(&mut self, ch: char) {
+        if self.cursor_controller.cursor_y == self.editor_rows.number_of_rows() {
+            self.editor_rows
+                .insert_row(self.editor_rows.number_of_rows(), String::new());
+            self.dirty += 1;
+        }
+        self.editor_rows
+            .get_editor_row_mut(self.cursor_controller.cursor_y)
+            .insert_char(self.cursor_controller.cursor_x, ch);
+        self.cursor_controller.cursor_x += 1;
+        self.dirty += 1;
+    }
+
+    pub fn insert_newline(&mut self) {
+        if self.cursor_controller.cursor_x == 0 {
+            self.editor_rows
+                .insert_row(self.cursor_controller.cursor_y, String::new())
+        } else {
+            let current_row = self
+                .editor_rows
+                .get_editor_row_mut(self.cursor_controller.cursor_y);
+            let new_row_content = current_row.row_content[self.cursor_controller.cursor_x..].into();
+            current_row
+                .row_content
+                .truncate(self.cursor_controller.cursor_x);
+            EditorRows::render_row(current_row);
+            self.editor_rows
+                .insert_row(self.cursor_controller.cursor_y + 1, new_row_content);
+        }
+        self.cursor_controller.cursor_x = 0;
+        self.cursor_controller.cursor_y += 1;
+        self.dirty += 1;
+    }
+
+    /// delete char
+    pub fn delete_char(&mut self) {
+        if self.cursor_controller.cursor_y == self.editor_rows.number_of_rows() {
+            return;
+        }
+        if self.cursor_controller.cursor_y == 0 && self.cursor_controller.cursor_x == 0 {
+            return;
+        }
+        let row = self
+            .editor_rows
+            .get_editor_row_mut(self.cursor_controller.cursor_y);
+        if self.cursor_controller.cursor_x > 0 {
+            row.delete_char(self.cursor_controller.cursor_x - 1);
+            self.cursor_controller.cursor_x -= 1;
+            self.dirty += 1;
+        } else {
+            let previous_row_content = self
+                .editor_rows
+                .get_render(self.cursor_controller.cursor_y - 1);
+            self.cursor_controller.cursor_x = previous_row_content.len();
+            self.editor_rows
+                .join_adjacent_rows(self.cursor_controller.cursor_y);
+            self.cursor_controller.cursor_y -= 1;
+        }
+        self.dirty += 1;
+    }
+
     /// refresh screen
     pub fn refresh_screen(&mut self) -> crossterm::Result<()> {
         self.cursor_controller.scroll(&self.editor_rows);
@@ -160,4 +223,63 @@ impl Writer {
         )?;
         self.editor_contents.flush()
     }
+}
+
+#[macro_export]
+macro_rules! prompt {
+    ($writer:expr, $($args:tt)*) => {{
+        let writer:&mut Writer = &mut $writer;
+        let mut input = String::with_capacity(32);
+        loop {
+            writer.status_message.set_message(format!($($args)*, input));
+            writer.refresh_screen()?;
+            match Reader.read_key()? {
+                // confirm
+                KeyEvent {
+                    code: KeyCode::Enter,
+                    modifiers: KeyModifiers::NONE,
+                } => {
+                    if !input.is_empty() {
+                        writer.status_message.set_message(String::new());
+                        break;
+                    }
+                }
+                // abort
+                KeyEvent {
+                    code: KeyCode::Esc,
+                    modifiers: KeyModifiers::NONE,
+                } => {
+                    if !input.is_empty() {
+                        writer.status_message.set_message(String::new());
+                        input.clear();
+                        break;
+                    }
+                }
+                // delete
+                KeyEvent {
+                    code: KeyCode::Backspace | KeyCode::Delete,
+                    modifiers: KeyModifiers::NONE,
+                } => {
+                    input.pop();
+                }
+                // input
+                KeyEvent {
+                    code: code @ (KeyCode::Char(..) | KeyCode::Tab),
+                    modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+                } => {
+                    input.push(match code {
+                        KeyCode::Tab => '\t',
+                        KeyCode::Char(ch) => ch,
+                        _ => unreachable!(),
+                    })
+                }
+                _ => {}
+            }
+        }
+        if input.is_empty() {
+            None
+        } else {
+            Some(input)
+        }
+    }};
 }

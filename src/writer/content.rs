@@ -1,7 +1,7 @@
 use crate::TAB_SIZE;
-use std::io::{stdout, ErrorKind, Write};
+use std::io::{stdout, Error, ErrorKind, Write};
 use std::path::PathBuf;
-use std::{env, fs};
+use std::{env, fs, io};
 
 /// Editor Contents struct
 pub struct EditorContents {
@@ -29,7 +29,7 @@ impl EditorContents {
 
 impl Write for EditorContents {
     /// impl write() - convert the bytes to str -> add it to the content
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         match std::str::from_utf8(buf) {
             Ok(s) => {
                 self.content.push_str(s);
@@ -40,7 +40,7 @@ impl Write for EditorContents {
     }
 
     /// impl flush() - clear the content for the next screen refresh
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> io::Result<()> {
         let out = write!(stdout(), "{}", self.content);
         stdout().flush()?;
         self.content.clear();
@@ -49,18 +49,31 @@ impl Write for EditorContents {
 }
 
 /// Row struct
+#[derive(Default)]
 pub struct Row {
-    pub row_content: Box<str>,
+    pub row_content: String,
     pub render: String,
 }
 
 impl Row {
     /// constructor
-    pub fn new(row_content: Box<str>, render: String) -> Self {
+    pub fn new(row_content: String, render: String) -> Self {
         Self {
             row_content,
             render,
         }
+    }
+
+    /// insert char
+    pub fn insert_char(&mut self, at: usize, ch: char) {
+        self.row_content.insert(at, ch);
+        EditorRows::render_row(self);
+    }
+
+    /// delete char
+    pub fn delete_char(&mut self, at: usize) {
+        self.row_content.remove(at);
+        EditorRows::render_row(self)
     }
 }
 
@@ -81,9 +94,7 @@ impl EditorRows {
             Some(file) => Self::from_file(file.into()),
         }
     }
-}
 
-impl EditorRows {
     /// display from file
     pub fn from_file(file: PathBuf) -> Self {
         let file_contents = fs::read_to_string(&file).expect("Unable to read file");
@@ -100,21 +111,58 @@ impl EditorRows {
         }
     }
 
+    /// save to the disk
+    pub fn save(&self) -> io::Result<usize> {
+        match &self.filename {
+            None => Err(Error::new(ErrorKind::Other, "No file name specified")),
+            Some(name) => {
+                let mut file = fs::OpenOptions::new().write(true).create(true).open(name)?;
+                let contents: String = self
+                    .row_contents
+                    .iter()
+                    .map(|it| it.row_content.as_str())
+                    .collect::<Vec<&str>>()
+                    .join("\n");
+                file.set_len(contents.len() as u64)?;
+                file.write_all(contents.as_bytes())?;
+                Ok(contents.as_bytes().len())
+            }
+        }
+    }
+
     /// rows number
     pub fn number_of_rows(&self) -> usize {
         self.row_contents.len()
     }
 
     /// get the at render
-    /// * `at` - the line of row
     pub fn get_render(&self, at: usize) -> &String {
         &self.row_contents[at].render
     }
 
     /// get the at editor row
-    /// * `at` - the line of row
     pub fn get_editor_row(&self, at: usize) -> &Row {
         &self.row_contents[at]
+    }
+
+    /// get the at editor row as mut
+    pub fn get_editor_row_mut(&mut self, at: usize) -> &mut Row {
+        &mut self.row_contents[at]
+    }
+
+    /// insert row
+    pub fn insert_row(&mut self, at: usize, contents: String) {
+        let mut new_row = Row::new(contents, String::new());
+        EditorRows::render_row(&mut new_row);
+        self.row_contents.insert(at, new_row);
+    }
+
+    /// backspacing at the start of the line
+    pub fn join_adjacent_rows(&mut self, at: usize) {
+        let current_row = self.row_contents.remove(at);
+        let previous_row = self.get_editor_row_mut(at - 1);
+        previous_row.row_content.push_str(&current_row.row_content);
+        Self::render_row(previous_row);
     }
 
     /// render row

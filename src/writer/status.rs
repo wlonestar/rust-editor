@@ -6,17 +6,15 @@ pub struct StatusMessage {
     pub set_time: Option<Instant>,
 }
 
-/// constructor
 impl StatusMessage {
+    /// constructor
     pub fn new(initial_message: String) -> Self {
         Self {
             message: Some(initial_message),
             set_time: None,
         }
     }
-}
 
-impl StatusMessage {
     /// set status message
     pub fn set_message(&mut self, message: String) {
         self.message = Some(message);

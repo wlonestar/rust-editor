@@ -28,9 +28,7 @@ impl CursorController {
             render_x: 0,
         }
     }
-}
 
-impl CursorController {
     /// scroll the screen
     pub fn scroll(&mut self, editor_rows: &EditorRows) {
         self.render_x = 0;

@@ -1,5 +1,6 @@
 use crate::reader::Reader;
 use crate::writer::Writer;
+use crate::{prompt, QUIT_TIMES};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::cmp;
 
@@ -7,6 +8,7 @@ use std::cmp;
 pub struct Editor {
     reader: Reader,
     writer: Writer,
+    quit_time: u8,
 }
 
 impl Editor {
@@ -15,6 +17,7 @@ impl Editor {
         Self {
             reader: Reader,
             writer: Writer::new(),
+            quit_time: QUIT_TIMES,
         }
     }
 
@@ -25,7 +28,17 @@ impl Editor {
             KeyEvent {
                 code: KeyCode::Char('q'),
                 modifiers: KeyModifiers::CONTROL,
-            } => return Ok(false),
+            } => {
+                if self.writer.dirty > 0 && self.quit_time > 0 {
+                    self.writer.status_message.set_message(format!(
+                        "WARNING!! File has unsaved changes. Press Ctrl-Q {} more times to quit.",
+                        self.quit_time
+                    ));
+                    self.quit_time -= 1;
+                    return Ok(true);
+                }
+                return Ok(false);
+            }
             // direction controller
             KeyEvent {
                 code:
@@ -59,6 +72,54 @@ impl Editor {
                     });
                 })
             }
+            // save file
+            KeyEvent {
+                code: KeyCode::Char('s'),
+                modifiers: KeyModifiers::CONTROL,
+            } => {
+                if matches!(self.writer.editor_rows.filename, None) {
+                    let prompt = prompt!(&mut self.writer, "Save as: {}").map(|it| it.into());
+                    if let None = prompt {
+                        self.writer
+                            .status_message
+                            .set_message("Save Aborted".into());
+                        return Ok(true);
+                    }
+                    self.writer.editor_rows.filename = prompt;
+                }
+                self.writer.editor_rows.save().map(|len| {
+                    self.writer
+                        .status_message
+                        .set_message(format!("{} bytes written to disk", len));
+                    self.writer.dirty = 0;
+                })?;
+            }
+            // delete char
+            KeyEvent {
+                code: key @ (KeyCode::Backspace | KeyCode::Delete),
+                modifiers: KeyModifiers::NONE,
+            } => {
+                if matches!(key, KeyCode::Delete) {
+                    self.writer.move_cursor(KeyCode::Right);
+                }
+                self.writer.delete_char();
+            }
+            // insert new line
+            KeyEvent {
+                code: KeyCode::Enter,
+                modifiers: KeyModifiers::NONE,
+            } => {
+                self.writer.insert_newline();
+            }
+            // insert char
+            KeyEvent {
+                code: code @ (KeyCode::Char(..) | KeyCode::Tab),
+                modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
+            } => self.writer.insert_char(match code {
+                KeyCode::Tab => '\t',
+                KeyCode::Char(ch) => ch,
+                _ => unreachable!(),
+            }),
             _ => {}
         }
         Ok(true)

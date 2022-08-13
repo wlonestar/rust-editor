@@ -7,6 +7,7 @@ use crossterm::terminal;
 
 const VERSION: &str = "0.1.0";
 const TAB_SIZE: usize = 4;
+const QUIT_TIMES: u8 = 2;
 
 pub struct CleanUp;
 
