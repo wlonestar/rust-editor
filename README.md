@@ -1,4 +1,4 @@
-# rim - a "rust" text editor
+# rust-editor - a "rust" text editor
 
 ## Background
 
