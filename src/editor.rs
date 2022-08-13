@@ -3,6 +3,7 @@ use crate::writer::Writer;
 use crate::{prompt, QUIT_TIMES};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::cmp;
+use std::path::PathBuf;
 
 /// Editor struct
 pub struct Editor {
@@ -49,7 +50,9 @@ impl Editor {
                     | KeyCode::Home
                     | KeyCode::End),
                 modifiers: KeyModifiers::NONE,
-            } => self.writer.move_cursor(direction),
+            } => {
+                self.writer.move_cursor(direction);
+            }
             // Scrolling with PageUp and PageDown
             KeyEvent {
                 code: val @ (KeyCode::PageUp | KeyCode::PageDown),
@@ -78,13 +81,29 @@ impl Editor {
                 modifiers: KeyModifiers::CONTROL,
             } => {
                 if matches!(self.writer.editor_rows.filename, None) {
-                    let prompt = prompt!(&mut self.writer, "Save as: {}").map(|it| it.into());
+                    let prompt = prompt!(&mut self.writer, "Save as: {} (Esc to cancel)")
+                        .map(|it| it.into());
                     if let None = prompt {
                         self.writer
                             .status_message
                             .set_message("Save Aborted".into());
                         return Ok(true);
                     }
+                    prompt
+                        .as_ref()
+                        .and_then(|path: &PathBuf| path.extension())
+                        .and_then(|ext| ext.to_str())
+                        .map(|ext| {
+                            Writer::select_syntax(ext).map(|syntax| {
+                                let highlight = self.writer.syntax_highlight.insert(syntax);
+                                for i in 0..self.writer.editor_rows.number_of_rows() {
+                                    highlight.update_syntax(
+                                        i,
+                                        &mut self.writer.editor_rows.row_contents,
+                                    );
+                                }
+                            })
+                        });
                     self.writer.editor_rows.filename = prompt;
                 }
                 self.writer.editor_rows.save().map(|len| {

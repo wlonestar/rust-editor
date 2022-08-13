@@ -1,4 +1,5 @@
-use crate::TAB_SIZE;
+use crate::writer::highlight::{HighlightType, SyntaxHighlight};
+use crate::{Writer, TAB_SIZE};
 use std::io::{stdout, Error, ErrorKind, Write};
 use std::path::PathBuf;
 use std::{env, fs, io};
@@ -53,6 +54,8 @@ impl Write for EditorContents {
 pub struct Row {
     pub row_content: String,
     pub render: String,
+    pub highlight: Vec<HighlightType>,
+    pub is_comment: bool,
 }
 
 impl Row {
@@ -61,6 +64,8 @@ impl Row {
         Self {
             row_content,
             render,
+            highlight: Vec::new(),
+            is_comment: false,
         }
     }
 
@@ -75,6 +80,20 @@ impl Row {
         self.row_content.remove(at);
         EditorRows::render_row(self)
     }
+
+    pub fn get_row_content_x(&self, render_x: usize) -> usize {
+        let mut current_render_x = 0;
+        for (cursor_x, ch) in self.row_content.chars().enumerate() {
+            if ch == '\t' {
+                current_render_x += (TAB_SIZE - 1) - (current_render_x % TAB_SIZE);
+            }
+            current_render_x += 1;
+            if current_render_x > render_x {
+                return cursor_x;
+            }
+        }
+        0
+    }
 }
 
 /// Editor Rows struct
@@ -85,28 +104,36 @@ pub struct EditorRows {
 
 impl EditorRows {
     /// constructor
-    pub fn new() -> Self {
+    pub fn new(syntax_highlight: &mut Option<Box<dyn SyntaxHighlight>>) -> Self {
         match env::args().nth(1) {
             None => Self {
                 row_contents: Vec::new(),
                 filename: None,
             },
-            Some(file) => Self::from_file(file.into()),
+            Some(file) => Self::from_file(file.into(), syntax_highlight),
         }
     }
 
     /// display from file
-    pub fn from_file(file: PathBuf) -> Self {
+    pub fn from_file(
+        file: PathBuf,
+        syntax_highlight: &mut Option<Box<dyn SyntaxHighlight>>,
+    ) -> Self {
         let file_contents = fs::read_to_string(&file).expect("Unable to read file");
+        let mut row_contents = Vec::new();
+        file.extension()
+            .and_then(|ext| ext.to_str())
+            .map(|ext| Writer::select_syntax(ext).map(|syntax| syntax_highlight.insert(syntax)));
+        file_contents.lines().enumerate().for_each(|(i, line)| {
+            let mut row = Row::new(line.into(), String::new());
+            Self::render_row(&mut row);
+            row_contents.push(row);
+            if let Some(it) = syntax_highlight {
+                it.update_syntax(i, &mut row_contents)
+            }
+        });
         Self {
-            row_contents: file_contents
-                .lines()
-                .map(|it| {
-                    let mut row = Row::new(it.into(), String::new());
-                    Self::render_row(&mut row);
-                    row
-                })
-                .collect(),
+            row_contents,
             filename: Some(file),
         }
     }
@@ -114,7 +141,7 @@ impl EditorRows {
     /// save to the disk
     pub fn save(&self) -> io::Result<usize> {
         match &self.filename {
-            None => Err(Error::new(ErrorKind::Other, "No file name specified")),
+            None => Err(Error::new(ErrorKind::Other, "no file name specified")),
             Some(name) => {
                 let mut file = fs::OpenOptions::new().write(true).create(true).open(name)?;
                 let contents: String = self

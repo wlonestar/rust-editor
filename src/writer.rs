@@ -1,12 +1,15 @@
 pub mod content;
 pub mod cursor_controller;
+pub mod highlight;
 pub mod status;
 
 use crate::writer::content::{EditorContents, EditorRows};
 use crate::writer::cursor_controller::CursorController;
+use crate::writer::highlight::{RustHighlight, SyntaxHighlight};
 use crate::writer::status::StatusMessage;
-use crate::VERSION;
+use crate::{BACKGROUND_COLOR, VERSION};
 use crossterm::event::KeyCode;
+use crossterm::style::{Color, SetBackgroundColor};
 use crossterm::terminal::ClearType;
 use crossterm::{cursor, execute, queue, style, terminal};
 use std::cmp;
@@ -20,6 +23,7 @@ pub struct Writer {
     pub editor_rows: EditorRows,
     pub status_message: StatusMessage,
     pub dirty: u64,
+    pub syntax_highlight: Option<Box<dyn SyntaxHighlight>>,
 }
 
 impl Writer {
@@ -28,14 +32,22 @@ impl Writer {
         let win_size = terminal::size()
             .map(|(x, y)| (x as usize, y as usize - 2))
             .unwrap();
+        let mut syntax_highlight = None;
         Self {
             win_size,
             editor_contents: EditorContents::new(),
             cursor_controller: CursorController::new(win_size),
-            editor_rows: EditorRows::new(),
+            editor_rows: EditorRows::new(&mut syntax_highlight),
             status_message: StatusMessage::new("HELP: Ctrl-S = Save | Ctrl-Q = Quit".into()),
             dirty: 0,
+            syntax_highlight,
         }
+    }
+
+    pub fn select_syntax(extension: &str) -> Option<Box<dyn SyntaxHighlight>> {
+        let list: Vec<Box<dyn SyntaxHighlight>> = vec![Box::new(RustHighlight::new())];
+        list.into_iter()
+            .find(|it| it.extensions().contains(&extension))
     }
 
     /// clear screen
@@ -74,20 +86,28 @@ impl Writer {
                     self.editor_contents.push('~');
                 }
             } else {
-                let row = self.editor_rows.get_render(file_row);
+                let row = self.editor_rows.get_editor_row(file_row);
+                let render = &row.render;
                 let column_offset = self.cursor_controller.column_offset;
-                let len = cmp::min(row.len().saturating_sub(column_offset), screen_columns);
+                let len = cmp::min(render.len().saturating_sub(column_offset), screen_columns);
                 let start = if len == 0 { 0 } else { column_offset };
-                self.editor_contents.push_str(&row[start..start + len])
+                self.syntax_highlight
+                    .as_ref()
+                    .map(|syntax_highlight| {
+                        syntax_highlight.color_row(
+                            &render[start..start + len],
+                            &row.highlight[start..start + len],
+                            &mut self.editor_contents,
+                        )
+                    })
+                    .unwrap_or_else(|| self.editor_contents.push_str(&render[start..start + len]));
             }
             queue!(
                 self.editor_contents,
                 terminal::Clear(ClearType::UntilNewLine)
             )
             .unwrap();
-            if i < screen_rows - 1 {
-                self.editor_contents.push_str("\r\n");
-            }
+            self.editor_contents.push_str("\r\n");
         }
     }
 
@@ -108,7 +128,11 @@ impl Writer {
         );
         let info_len = cmp::min(info.len(), self.win_size.0);
         let line_info = format!(
-            "{}/{}",
+            "{} | {}/{}",
+            self.syntax_highlight
+                .as_ref()
+                .map(|highlight| highlight.file_type())
+                .unwrap_or("no ft"),
             self.cursor_controller.cursor_y + 1,
             self.editor_rows.number_of_rows()
         );
@@ -155,10 +179,17 @@ impl Writer {
         self.editor_rows
             .get_editor_row_mut(self.cursor_controller.cursor_y)
             .insert_char(self.cursor_controller.cursor_x, ch);
+        if let Some(it) = self.syntax_highlight.as_ref() {
+            it.update_syntax(
+                self.cursor_controller.cursor_y,
+                &mut self.editor_rows.row_contents,
+            );
+        }
         self.cursor_controller.cursor_x += 1;
         self.dirty += 1;
     }
 
+    /// insert new line
     pub fn insert_newline(&mut self) {
         if self.cursor_controller.cursor_x == 0 {
             self.editor_rows
@@ -174,6 +205,16 @@ impl Writer {
             EditorRows::render_row(current_row);
             self.editor_rows
                 .insert_row(self.cursor_controller.cursor_y + 1, new_row_content);
+            if let Some(it) = self.syntax_highlight.as_ref() {
+                it.update_syntax(
+                    self.cursor_controller.cursor_y,
+                    &mut self.editor_rows.row_contents,
+                );
+                it.update_syntax(
+                    self.cursor_controller.cursor_y + 1,
+                    &mut self.editor_rows.row_contents,
+                );
+            }
         }
         self.cursor_controller.cursor_x = 0;
         self.cursor_controller.cursor_y += 1;
@@ -188,13 +229,11 @@ impl Writer {
         if self.cursor_controller.cursor_y == 0 && self.cursor_controller.cursor_x == 0 {
             return;
         }
-        let row = self
-            .editor_rows
-            .get_editor_row_mut(self.cursor_controller.cursor_y);
         if self.cursor_controller.cursor_x > 0 {
-            row.delete_char(self.cursor_controller.cursor_x - 1);
+            self.editor_rows
+                .get_editor_row_mut(self.cursor_controller.cursor_y)
+                .delete_char(self.cursor_controller.cursor_x - 1);
             self.cursor_controller.cursor_x -= 1;
-            self.dirty += 1;
         } else {
             let previous_row_content = self
                 .editor_rows
@@ -204,11 +243,18 @@ impl Writer {
                 .join_adjacent_rows(self.cursor_controller.cursor_y);
             self.cursor_controller.cursor_y -= 1;
         }
+        if let Some(it) = self.syntax_highlight.as_ref() {
+            it.update_syntax(
+                self.cursor_controller.cursor_y,
+                &mut self.editor_rows.row_contents,
+            );
+        }
         self.dirty += 1;
     }
 
     /// refresh screen
     pub fn refresh_screen(&mut self) -> crossterm::Result<()> {
+        execute!(stdout(), SetBackgroundColor(Color::from(BACKGROUND_COLOR)));
         self.cursor_controller.scroll(&self.editor_rows);
         queue!(self.editor_contents, cursor::Hide, cursor::MoveTo(0, 0))?;
         self.draw_rows();
@@ -227,11 +273,14 @@ impl Writer {
 
 #[macro_export]
 macro_rules! prompt {
-    ($writer:expr, $($args:tt)*) => {{
-        let writer:&mut Writer = &mut $writer;
+    ($writer:expr, $args:tt) => {
+        prompt!($writer, $args, callback = |&_, _, _| {})
+    };
+    ($writer:expr, $args:tt, callback = $callback:expr) => {{
+        let writer: &mut Writer = &mut $writer;
         let mut input = String::with_capacity(32);
         loop {
-            writer.status_message.set_message(format!($($args)*, input));
+            writer.status_message.set_message(format!($args, input));
             writer.refresh_screen()?;
             match Reader.read_key()? {
                 // confirm
@@ -241,6 +290,7 @@ macro_rules! prompt {
                 } => {
                     if !input.is_empty() {
                         writer.status_message.set_message(String::new());
+                        $callback(writer, &input, KeyCode::Enter);
                         break;
                     }
                 }
@@ -249,11 +299,10 @@ macro_rules! prompt {
                     code: KeyCode::Esc,
                     modifiers: KeyModifiers::NONE,
                 } => {
-                    if !input.is_empty() {
-                        writer.status_message.set_message(String::new());
-                        input.clear();
-                        break;
-                    }
+                    writer.status_message.set_message(String::new());
+                    input.clear();
+                    $callback(writer, &input, KeyCode::Esc);
+                    break;
                 }
                 // delete
                 KeyEvent {
@@ -266,15 +315,14 @@ macro_rules! prompt {
                 KeyEvent {
                     code: code @ (KeyCode::Char(..) | KeyCode::Tab),
                     modifiers: KeyModifiers::NONE | KeyModifiers::SHIFT,
-                } => {
-                    input.push(match code {
-                        KeyCode::Tab => '\t',
-                        KeyCode::Char(ch) => ch,
-                        _ => unreachable!(),
-                    })
-                }
+                } => input.push(match code {
+                    KeyCode::Tab => '\t',
+                    KeyCode::Char(ch) => ch,
+                    _ => unreachable!(),
+                }),
                 _ => {}
             }
+            $callback(writer, &input, KeyCode::Null);
         }
         if input.is_empty() {
             None
