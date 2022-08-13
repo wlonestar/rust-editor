@@ -6,6 +6,7 @@ use crate::writer::Writer;
 use crossterm::terminal;
 
 const VERSION: &str = "0.1.0";
+const TAB_SIZE: usize = 4;
 
 pub struct CleanUp;
 
