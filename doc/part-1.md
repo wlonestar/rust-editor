@@ -3,7 +3,7 @@
 ## 1. create cargo project and add dependencies
 
 ```shell
-cargo new rim
+cargo new rust-editor
 ```
 
 ```toml
